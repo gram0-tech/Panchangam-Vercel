@@ -29,6 +29,14 @@ def http_with_retry(method, url, *, max_attempts=3, backoff=0.75, **kwargs):
             time.sleep(backoff * attempt)
     raise last_exc if last_exc else RuntimeError("HTTP error")
 
+
+#---------------------------
+# MET OFFICE (UKMO GLOBAL) SUN TIMES
+#---------------------------
+# Sunrise & sunset comes from UK Met Office model via Open-Meteo UKMO API:
+# The Open-Meteo UKMO API documentation explicitly lists "sunrise" and "sunset"
+# as available daily variables. [1](https://whapi.cloud/docs)
+
 def get_metoffice_sun_times(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -41,9 +49,32 @@ def get_metoffice_sun_times(lat, lon):
     r = http_with_retry("GET", url, params=params)
     r.raise_for_status()
     data = r.json().get("daily", {})
-    sunrise = data.get("sunrise", ["—"])[0]
-    sunset = data.get("sunset", ["—"])[0]
-    return sunrise, sunset
+
+    sunrise_list = data.get("sunrise", [])
+    sunset_list  = data.get("sunset", [])
+
+    # Defensive: sunrise/sunset can be empty or missing (rare)
+    if not sunrise_list or not sunset_list:
+        raise Exception(f"MetOffice API missing sunrise/sunset: {data}")
+
+    return sunrise_list[0], sunset_list[0]
+
+
+# Normalize timestamps so datetime.fromisoformat() always works
+def normalize_iso(ts):
+    if not ts:
+        return None
+    # Example MetOffice format: "2026-03-12T06:27"
+    if len(ts) == 16:  # YYYY-MM-DDTHH:MM
+        return ts + ":00+00:00"
+    if len(ts) == 19:  # YYYY-MM-DDTHH:MM:SS
+        return ts + "+00:00"
+    return ts
+
+
+#---------------------------
+# India Date for Prokerala
+#---------------------------
 
 def today_india_iso():
     today = dt.date.today().strftime("%Y-%m-%d")
@@ -132,13 +163,6 @@ def get_panchang(token, lang, lat, lon, ayan):
     r.raise_for_status()
     return r.json()
 
-def normalize_iso(ts):
-    # If timestamp has no timezone, assume UK timezone (Europe/London)
-    if ts and len(ts) == 16:  # format YYYY-MM-DDTHH:MM
-        return ts + ":00+00:00"
-    if ts and len(ts) == 19:  # YYYY-MM-DDTHH:MM:SS
-        return ts + "+00:00"
-    return ts
 
 def send_whatsapp(body, to_number, token):
     url = "https://gate.whapi.cloud/messages/text"
@@ -153,14 +177,13 @@ def send_whatsapp(body, to_number, token):
 # Message Builder
 #---------------------------
 
-def build_message(te, ta):
-    # Telugu
+def build_message(te, ta, lat, lon):
+    # --- Panchang Data ---
     tithiTE = _safe(te, "data", "tithi", 0, "name")
     nakTE   = _safe(te, "data", "nakshatra", 0, "name")
     yogaTE  = _safe(te, "data", "yoga", 0, "name")
     karTE   = _safe(te, "data", "karana", 0, "name")
 
-    # Tamil
     tithiTA = _safe(ta, "data", "tithi", 0, "name")
     nakTA   = _safe(ta, "data", "nakshatra", 0, "name")
     yogaTA  = _safe(ta, "data", "yoga", 0, "name")
@@ -170,15 +193,15 @@ def build_message(te, ta):
     weekdayTA = _safe(ta, "data", "vaara")
     weekdayEN = dt.date.today().strftime("%A")
 
+    # --- UK Sunrise/Sunset (Met Office Model) ---
     uk_sunrise_raw, uk_sunset_raw = get_metoffice_sun_times(float(lat), float(lon))
-
     sunrise_raw = normalize_iso(uk_sunrise_raw)
     sunset_raw  = normalize_iso(uk_sunset_raw)
 
     sunrise = to_uk(sunrise_raw)
     sunset  = to_uk(sunset_raw)
 
-    # Rahu/Yama/Gulika
+    # --- Rahu / Yama / Gulika ---
     try:
         rk, yg, gk = calc_kalams(sunrise_raw, sunset_raw)
         rahu  = f"{rk[0]}–{rk[1]}"
@@ -187,7 +210,7 @@ def build_message(te, ta):
     except Exception:
         rahu = yama = guli = "—"
 
-    # Abhijit & Brahma
+    # --- Abhijit & Brahma ---
     try:
         (abhi_s, abhi_e), (bra_s, bra_e) = calc_abhi_brahma(sunrise_raw, sunset_raw)
     except Exception:
@@ -223,7 +246,7 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"Unauthorized")
                 return
 
-        # Load environment variables
+        # Load env vars
         cid  = os.getenv("PROKERALA_CLIENT_ID")
         csec = os.getenv("PROKERALA_CLIENT_SECRET")
         wtok = os.getenv("WHAPI_TOKEN")
@@ -232,7 +255,7 @@ class handler(BaseHTTPRequestHandler):
         lon = os.getenv("LON", "-0.4696")
         ay  = os.getenv("AYANAMSA", "1")
 
-        # Validate
+        # Validate basics
         if not cid or not csec or not wtok or not to_number:
             self.send_response(500)
             self.end_headers()
@@ -244,7 +267,7 @@ class handler(BaseHTTPRequestHandler):
             te = get_panchang(token, "te", lat, lon, ay)
             ta = get_panchang(token, "ta", lat, lon, ay)
 
-            msg = build_message(te, ta)
+            msg = build_message(te, ta, lat, lon)
             send_whatsapp(msg, to_number, wtok)
 
             self.send_response(200)
@@ -255,5 +278,3 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(f"Error: {e}".encode())
-
-
