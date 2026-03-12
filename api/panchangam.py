@@ -1,5 +1,5 @@
 from http.server import BaseHTTPRequestHandler
-import os, time, requests, traceback
+import os, time, requests, traceback, re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import datetime as dt
@@ -70,11 +70,20 @@ def get_panchang(token, lang, lat, lon, ayan):
     r.raise_for_status(); return r.json()
 
 # ========= WhatsApp (Whapi) =========
+WHAPI_TO_PATTERN = re.compile(r'^[\d-]{9,31}(?:@[\w\.]{1,})?$')
+
+def sanitize_to_number(raw: str) -> str | None:
+    if not raw: return None
+    # keep digits and hyphens only; drop spaces, plus, parentheses, etc.
+    n = ''.join(ch for ch in raw if ch.isdigit() or ch == '-')
+    # validate against Whapi requirement
+    return n if WHAPI_TO_PATTERN.fullmatch(n) else None
+
 def send_whatsapp(body, to, token):
     r = http_with_retry("POST", "https://gate.whapi.cloud/messages/text",
-                        json={"to":to,"body":body},
+                        json={"to": to, "body": body},
                         headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"})
-    if r.status_code not in (200,201):
+    if r.status_code not in (200, 201):
         raise Exception(f"WhatsApp send error: {r.text}")
 
 # ========= Helpers =========
@@ -118,7 +127,7 @@ def calc_abhi_brahma(sr_iso, ss_iso):
 
 # ========= Message (EN → HI → TA → TE → KN) =========
 def build_message(en, hi, ta, te, kn, lat, lon):
-    # Extract names for each language (fetched individually)
+    # Extract names (each language fetched individually)
     tithiEN,nakEN,yogaEN,karEN,weekdayEN = extract_names(en)
     tithiHI,nakHI,yogaHI,karHI,weekdayHI = extract_names(hi)
     tithiTA,nakTA,yogaTA,karTA,weekdayTA = extract_names(ta)
@@ -152,7 +161,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
     now_uk = datetime.now(ZoneInfo("Europe/London")).strftime("%d %b %Y, %I:%M %p").lstrip("0")
     sep = "—"*42
 
-    # English
     en_blk = (
         f"📿 *English Panchangam – Chelmsford* ({weekdayEN})\n"
         f"🗓 *Tithi*: {tithiEN}   •   ✨ *Nakshatra*: {nakEN}\n"
@@ -161,7 +169,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
         f"☀ *Abhijit*: {abhi_s}–{abhi_e}   •   🌄 *Brahma*: {bra_s}–{bra_e}\n"
         f"☀ *Rahu Kalam*: {rahu}   •   🌘 *Yamagandam*: {yama}   •   🕉️ *Gulika*: {guli}"
     )
-    # Hindi
     hi_blk = (
         f"📿 *हिन्दी पंचांग – Chelmsford* ({weekdayHI})\n"
         f"🗓 *तिथि*: {tithiHI}   •   ✨ *नक्षत्र*: {nakHI}\n"
@@ -170,7 +177,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
         f"☀ *अभिजीत*: {abhi_s}–{abhi_e}   •   🌄 *ब्रह्म*: {bra_s}–{bra_e}\n"
         f"☀ *राहुकाल*: {rahu}   •   🌘 *यमगण्ड*: {yama}   •   🕉️ *गुलिक*: {guli}"
     )
-    # Tamil
     ta_blk = (
         f"📿 *Tamil Panchangam – Chelmsford* ({weekdayTA})\n"
         f"🗓 *திதி*: {tithiTA}   •   ✨ *நட்சத்திரம்*: {nakTA}\n"
@@ -179,7 +185,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
         f"☀ *அபிஜித்*: {abhi_s}–{abhi_e}   •   🌄 *பிரம்ம*: {bra_s}–{bra_e}\n"
         f"☀ *ராகு*: {rahu}   •   🌘 *எமகண்டம்*: {yama}   •   🕉️ *குளிகை*: {guli}"
     )
-    # Telugu
     te_blk = (
         f"📿 *Telugu Panchangam – Chelmsford* ({weekdayTE})\n"
         f"🗓 *తిథి*: {tithiTE}   •   ✨ *నక్షత్రం*: {nakTE}\n"
@@ -188,7 +193,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
         f"☀ *అభిజిత్*: {abhi_s}–{abhi_e}   •   🌄 *బ్రహ్మ*: {bra_s}–{bra_e}\n"
         f"☀ *రాహుకాలం*: {rahu}   •   🌘 *యమగండం*: {yama}   •   🕉️ *గులిక*: {guli}"
     )
-    # Kannada
     kn_blk = (
         f"📿 *Kannada ಪಂಚಾಂಗ – Chelmsford* ({weekdayKN})\n"
         f"🗓 *ತಿಥಿ*: {tithiKN}   •   ✨ *ನಕ್ಷತ್ರ*: {nakKN}\n"
@@ -199,7 +203,6 @@ def build_message(en, hi, ta, te, kn, lat, lon):
     )
 
     header = f"🕘 *{now_uk}*\n{sep}"
-    # Order: English → Hindi → Tamil → Telugu → Kannada
     return "\n".join([header, en_blk, sep, hi_blk, sep, ta_blk, sep, te_blk, sep, kn_blk])
 
 # ========= Handler =========
@@ -213,7 +216,7 @@ class handler(BaseHTTPRequestHandler):
         cid  = os.getenv("PROKERALA_CLIENT_ID")
         csec = os.getenv("PROKERALA_CLIENT_SECRET")
         wtok = os.getenv("WHAPI_TOKEN")
-        to_all = os.getenv("WHATSAPP_TO","")  # comma-separated digits (no +)
+        to_all = os.getenv("WHATSAPP_TO","")  # comma-separated digits/hyphens (no +)
         lat  = os.getenv("LAT","51.7350")
         lon  = os.getenv("LON","-0.4696")
         ay   = os.getenv("AYANAMSA","1")
@@ -224,12 +227,10 @@ class handler(BaseHTTPRequestHandler):
         try:
             token = get_token(cid, csec)
 
-            # Fetch calendars INDIVIDUALLY by language (no translation)
+            # Fetch each language individually (no translation)
             def fetch_lang(lang):
-                try:
-                    return get_panchang(token, lang, lat, lon, ay)
-                except:
-                    return {"data":{}}  # empty block if a specific language fails
+                try: return get_panchang(token, lang, lat, lon, ay)
+                except: return {"data":{}}  # empty if that language fails
 
             en = fetch_lang("en")
             hi = fetch_lang("hi")
@@ -239,12 +240,25 @@ class handler(BaseHTTPRequestHandler):
 
             msg = build_message(en, hi, ta, te, kn, lat, lon)
 
+            # Multi-send with validation & resilience
+            results = []
             for raw in to_all.split(","):
-                n = raw.strip()
-                if n:
+                n = sanitize_to_number(raw.strip())
+                if not n:
+                    results.append(f"{raw.strip()}: FAIL - invalid format")
+                    continue
+                try:
                     send_whatsapp(msg, n, wtok)
+                    results.append(f"{n}: OK")
+                except Exception as ex:
+                    results.append(f"{n}: FAIL - {ex}")
 
-            self.send_response(200); self.end_headers(); self.wfile.write(b"Sent")
+            body = ("Sent\n" + "\n".join(results)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type","text/plain; charset=utf-8")
+            self.send_header("Content-Length",str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         except Exception:
             tb = traceback.format_exc().encode()
