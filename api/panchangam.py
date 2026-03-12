@@ -1,42 +1,34 @@
 from http.server import BaseHTTPRequestHandler
-import os, json, re, time
+import os, time, requests, traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import datetime as dt
-import requests
 
-
-#---------------------------
-# Internal Helpers
-#---------------------------
-
+# -------------------------------------------------------
+# Retry helper
+# -------------------------------------------------------
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 def http_with_retry(method, url, *, max_attempts=3, backoff=0.75, **kwargs):
     attempt, last_exc = 0, None
-    timeout = kwargs.pop("timeout", 25)
+    timeout = kwargs.pop("timeout", 20)
     while attempt < max_attempts:
         try:
             r = requests.request(method, url, timeout=timeout, **kwargs)
             if r.status_code in RETRY_STATUS:
                 raise requests.RequestException(f"{r.status_code} {r.reason}: {r.text}")
             return r
-        except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+        except Exception as e:
             last_exc = e
             attempt += 1
             if attempt >= max_attempts:
                 break
             time.sleep(backoff * attempt)
-    raise last_exc if last_exc else RuntimeError("HTTP error")
+    raise last_exc
 
-
-#---------------------------
-# MET OFFICE (UKMO GLOBAL) SUN TIMES
-#---------------------------
-# Sunrise & sunset comes from UK Met Office model via Open-Meteo UKMO API:
-# The Open-Meteo UKMO API documentation explicitly lists "sunrise" and "sunset"
-# as available daily variables. [1](https://whapi.cloud/docs)
-
+# -------------------------------------------------------
+# Met Office (UKMO Global) Sunrise/Sunset via Open‑Meteo
+# -------------------------------------------------------
 def get_metoffice_sun_times(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -48,78 +40,70 @@ def get_metoffice_sun_times(lat, lon):
     }
     r = http_with_retry("GET", url, params=params)
     r.raise_for_status()
-    data = r.json().get("daily", {})
+    daily = r.json().get("daily", {})
+    sr_list = daily.get("sunrise", [])
+    ss_list = daily.get("sunset", [])
+    if not sr_list or not ss_list:
+        raise Exception(f"MetOffice sunrise/sunset missing: {daily}")
+    return sr_list[0], ss_list[0]  # e.g. "2026-03-12T06:27" (local)
 
-    sunrise_list = data.get("sunrise", [])
-    sunset_list  = data.get("sunset", [])
-
-    # Defensive: sunrise/sunset can be empty or missing (rare)
-    if not sunrise_list or not sunset_list:
-        raise Exception(f"MetOffice API missing sunrise/sunset: {data}")
-
-    return sunrise_list[0], sunset_list[0]
-
-
-# Normalize timestamps so datetime.fromisoformat() always works
-def normalize_iso(ts):
+# Parse Open‑Meteo local string → timezone‑aware Europe/London datetime
+def parse_london_aware(ts: str):
     if not ts:
         return None
-    # Example MetOffice format: "2026-03-12T06:27"
-    if len(ts) == 16:  # YYYY-MM-DDTHH:MM
-        return ts + ":00+00:00"
-    if len(ts) == 19:  # YYYY-MM-DDTHH:MM:SS
-        return ts + "+00:00"
-    return ts
+    # Add seconds if missing (YYYY-MM-DDTHH:MM → +":00")
+    if len(ts) == 16:
+        ts = ts + ":00"
+    dt_obj = datetime.fromisoformat(ts)  # may be naive local
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=ZoneInfo("Europe/London"))
+    return dt_obj  # aware, with +00:00 or +01:00 depending on date
 
-
-#---------------------------
-# India Date for Prokerala
-#---------------------------
-
-def today_india_iso():
-    today = dt.date.today().strftime("%Y-%m-%d")
-    return f"{today}T05:30:00+05:30"
-
-
-def to_uk(ts: str) -> str:
+def to_uk(ts_iso: str) -> str:
     try:
-        d = datetime.fromisoformat(ts)
+        d = datetime.fromisoformat(ts_iso)
         uk = d.astimezone(ZoneInfo("Europe/London"))
         return uk.strftime("%I:%M %p").lstrip("0")
-    except Exception:
+    except:
         return "—"
 
+# -------------------------------------------------------
+# India-time date for Prokerala
+# -------------------------------------------------------
+def today_india_iso():
+    return f"{dt.date.today().strftime('%Y-%m-%d')}T05:30:00+05:30"
 
+# -------------------------------------------------------
+# Rahu / Yama / Gulika / Abhijit / Brahma
+# -------------------------------------------------------
 def calc_kalams(sr_ts, ss_ts):
     sr = datetime.fromisoformat(sr_ts).astimezone(ZoneInfo("Europe/London"))
     ss = datetime.fromisoformat(ss_ts).astimezone(ZoneInfo("Europe/London"))
     seg = (ss - sr).total_seconds() / 8
     wd = sr.weekday()
-
     rahu_index   = [2, 7, 5, 6, 4, 3, 8][wd]
     yama_index   = [5, 4, 3, 2, 7, 6, 1][wd]
     gulika_index = [7, 6, 5, 4, 3, 2, 1][wd]
-
     def seg_range(i):
         s = sr + dt.timedelta(seconds=seg * (i - 1))
         e = sr + dt.timedelta(seconds=seg * i)
         return (s.strftime("%I:%M %p").lstrip("0"), e.strftime("%I:%M %p").lstrip("0"))
-
     return seg_range(rahu_index), seg_range(yama_index), seg_range(gulika_index)
-
 
 def calc_abhi_brahma(sr_ts, ss_ts):
     sr = datetime.fromisoformat(sr_ts).astimezone(ZoneInfo("Europe/London"))
     ss = datetime.fromisoformat(ss_ts).astimezone(ZoneInfo("Europe/London"))
-
     midday = sr + ((ss - sr) / 2)
-    abhi_s, abhi_e = midday - dt.timedelta(minutes=24), midday + dt.timedelta(minutes=24)
-    bra_s,  bra_e  = sr - dt.timedelta(minutes=96), sr - dt.timedelta(minutes=48)
-
+    abhi_s = midday - dt.timedelta(minutes=24)
+    abhi_e = midday + dt.timedelta(minutes=24)
+    bra_s = sr - dt.timedelta(minutes=96)
+    bra_e = sr - dt.timedelta(minutes=48)
     fmt = lambda x: x.strftime("%I:%M %p").lstrip("0")
     return (fmt(abhi_s), fmt(abhi_e)), (fmt(bra_s), fmt(bra_e))
 
-
+# -------------------------------------------------------
+# Safe lookup helper
+# -------------------------------------------------------
 def _safe(obj, *path):
     for p in path:
         if isinstance(obj, dict) and isinstance(p, str):
@@ -130,15 +114,12 @@ def _safe(obj, *path):
             return "—"
     return obj
 
-
-#---------------------------
+# -------------------------------------------------------
 # Prokerala + WhatsApp
-#---------------------------
-
+# -------------------------------------------------------
 def get_token(cid, sec):
     r = http_with_retry(
-        "POST",
-        "https://api.prokerala.com/token",
+        "POST", "https://api.prokerala.com/token",
         data={"grant_type": "client_credentials"},
         headers={"Accept": "application/json"},
         auth=(cid, sec),
@@ -146,23 +127,14 @@ def get_token(cid, sec):
     r.raise_for_status()
     return r.json()["access_token"]
 
-
 def get_panchang(token, lang, lat, lon, ayan):
     url = "https://api.prokerala.com/v2/astrology/panchang"
-    params = {
-        "la": lang,
-        "datetime": today_india_iso(),
-        "coordinates": f"{lat},{lon}",
-        "ayanamsa": ayan
-    }
-    r = http_with_retry(
-        "GET", url,
-        params=params,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    )
+    params = {"la": lang, "datetime": today_india_iso(),
+              "coordinates": f"{lat},{lon}", "ayanamsa": ayan}
+    r = http_with_retry("GET", url, params=params,
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
     r.raise_for_status()
     return r.json()
-
 
 def send_whatsapp(body, to_number, token):
     url = "https://gate.whapi.cloud/messages/text"
@@ -172,18 +144,15 @@ def send_whatsapp(body, to_number, token):
     if r.status_code not in (200, 201):
         raise Exception(f"WhatsApp send error: {r.text}")
 
-
-#---------------------------
+# -------------------------------------------------------
 # Message Builder
-#---------------------------
-
+# -------------------------------------------------------
 def build_message(te, ta, lat, lon):
-    # --- Panchang Data ---
+    # Panchang values
     tithiTE = _safe(te, "data", "tithi", 0, "name")
     nakTE   = _safe(te, "data", "nakshatra", 0, "name")
     yogaTE  = _safe(te, "data", "yoga", 0, "name")
     karTE   = _safe(te, "data", "karana", 0, "name")
-
     tithiTA = _safe(ta, "data", "tithi", 0, "name")
     nakTA   = _safe(ta, "data", "nakshatra", 0, "name")
     yogaTA  = _safe(ta, "data", "yoga", 0, "name")
@@ -193,27 +162,34 @@ def build_message(te, ta, lat, lon):
     weekdayTA = _safe(ta, "data", "vaara")
     weekdayEN = dt.date.today().strftime("%A")
 
-    # --- UK Sunrise/Sunset (Met Office Model) ---
-    uk_sunrise_raw, uk_sunset_raw = get_metoffice_sun_times(float(lat), float(lon))
-    sunrise_raw = normalize_iso(uk_sunrise_raw)
-    sunset_raw  = normalize_iso(uk_sunset_raw)
-
-    sunrise = to_uk(sunrise_raw)
-    sunset  = to_uk(sunset_raw)
-
-    # --- Rahu / Yama / Gulika ---
+    # Sunrise / Sunset (UKMO) with fallback to Prokerala if needed
     try:
-        rk, yg, gk = calc_kalams(sunrise_raw, sunset_raw)
+        uk_sr_str, uk_ss_str = get_metoffice_sun_times(float(lat), float(lon))
+        sr_dt = parse_london_aware(uk_sr_str)
+        ss_dt = parse_london_aware(uk_ss_str)
+        sr_raw = sr_dt.isoformat()
+        ss_raw = ss_dt.isoformat()
+    except Exception:
+        # fallback
+        sr_raw = _safe(te, "data", "sunrise")
+        ss_raw = _safe(te, "data", "sunset")
+
+    sunrise = to_uk(sr_raw)
+    sunset  = to_uk(ss_raw)
+
+    # Rahu / Yamagandam / Gulikai
+    try:
+        rk, yg, gk = calc_kalams(sr_raw, ss_raw)
         rahu  = f"{rk[0]}–{rk[1]}"
         yama  = f"{yg[0]}–{yg[1]}"
         guli  = f"{gk[0]}–{gk[1]}"
-    except Exception:
+    except:
         rahu = yama = guli = "—"
 
-    # --- Abhijit & Brahma ---
+    # Abhijit / Brahma
     try:
-        (abhi_s, abhi_e), (bra_s, bra_e) = calc_abhi_brahma(sunrise_raw, sunset_raw)
-    except Exception:
+        (abhi_s, abhi_e), (bra_s, bra_e) = calc_abhi_brahma(sr_raw, ss_raw)
+    except:
         abhi_s = abhi_e = bra_s = bra_e = "—"
 
     return (
@@ -229,24 +205,18 @@ def build_message(te, ta, lat, lon):
         f"☀ ராகு: {rahu} | 🌘 எமகண்டம்: {yama} | 🕉️ குளிகை: {guli}\n"
     )
 
-
-#---------------------------
-# Vercel Handler
-#---------------------------
-
+# -------------------------------------------------------
+# Vercel handler
+# -------------------------------------------------------
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # Secure cron job
+        # CRON security
         cron_secret = os.getenv("CRON_SECRET", "")
         auth = self.headers.get("authorization", "")
-        if cron_secret:
-            if auth != f"Bearer {cron_secret}":
-                self.send_response(401)
-                self.end_headers()
-                self.wfile.write(b"Unauthorized")
-                return
+        if cron_secret and auth != f"Bearer {cron_secret}":
+            self.send_response(401); self.end_headers(); self.wfile.write(b"Unauthorized"); return
 
-        # Load env vars
+        # Env vars
         cid  = os.getenv("PROKERALA_CLIENT_ID")
         csec = os.getenv("PROKERALA_CLIENT_SECRET")
         wtok = os.getenv("WHAPI_TOKEN")
@@ -255,12 +225,8 @@ class handler(BaseHTTPRequestHandler):
         lon = os.getenv("LON", "-0.4696")
         ay  = os.getenv("AYANAMSA", "1")
 
-        # Validate basics
         if not cid or not csec or not wtok or not to_number:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(b"Missing required environment variables.")
-            return
+            self.send_response(500); self.end_headers(); self.wfile.write(b"Missing required environment variables."); return
 
         try:
             token = get_token(cid, csec)
@@ -270,11 +236,13 @@ class handler(BaseHTTPRequestHandler):
             msg = build_message(te, ta, lat, lon)
             send_whatsapp(msg, to_number, wtok)
 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Sent")
+            self.send_response(200); self.end_headers(); self.wfile.write(b"Sent")
 
         except Exception as e:
+            tb = traceback.format_exc().encode()
             self.send_response(500)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(tb)))
             self.end_headers()
-            self.wfile.write(f"Error: {e}".encode())
+            self.wfile.write(tb)
+``
