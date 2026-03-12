@@ -132,6 +132,13 @@ def get_panchang(token, lang, lat, lon, ayan):
     r.raise_for_status()
     return r.json()
 
+def normalize_iso(ts):
+    # If timestamp has no timezone, assume UK timezone (Europe/London)
+    if ts and len(ts) == 16:  # format YYYY-MM-DDTHH:MM
+        return ts + ":00+00:00"
+    if ts and len(ts) == 19:  # YYYY-MM-DDTHH:MM:SS
+        return ts + "+00:00"
+    return ts
 
 def send_whatsapp(body, to_number, token):
     url = "https://gate.whapi.cloud/messages/text"
@@ -164,8 +171,9 @@ def build_message(te, ta):
     weekdayEN = dt.date.today().strftime("%A")
 
     uk_sunrise_raw, uk_sunset_raw = get_metoffice_sun_times(float(lat), float(lon))
-    sunrise_raw = uk_sunrise_raw
-    sunset_raw  = uk_sunset_raw
+
+    sunrise_raw = normalize_iso(uk_sunrise_raw)
+    sunset_raw  = normalize_iso(uk_sunset_raw)
 
     sunrise = to_uk(sunrise_raw)
     sunset  = to_uk(sunset_raw)
@@ -247,4 +255,5 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(f"Error: {e}".encode())
+
 
