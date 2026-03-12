@@ -48,8 +48,7 @@ def get_metoffice_sun_times(lat, lon):
 def parse_london(ts):
     if not ts:
         return None
-    # Add seconds if missing (YYYY-MM-DDTHH:MM → +":00")
-    if len(ts) == 16:
+    if len(ts) == 16:  # YYYY-MM-DDTHH:MM
         ts = ts + ":00"
     dt_obj = datetime.fromisoformat(ts)
     if dt_obj.tzinfo is None:
@@ -95,7 +94,7 @@ def get_panchang(token, lang, lat, lon, ayan):
     return r.json()
 
 # =========================
-# WhatsApp sender (Whapi)
+# WhatsApp (Whapi)
 # =========================
 def send_whatsapp(body, to, token):
     r = http_with_retry(
@@ -267,4 +266,3 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length",str(len(tb)))
             self.end_headers()
             self.wfile.write(tb)
-
