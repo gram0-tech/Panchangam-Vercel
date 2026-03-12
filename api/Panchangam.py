@@ -29,6 +29,21 @@ def http_with_retry(method, url, *, max_attempts=3, backoff=0.75, **kwargs):
             time.sleep(backoff * attempt)
     raise last_exc if last_exc else RuntimeError("HTTP error")
 
+def get_metoffice_sun_times(lat, lon):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "sunrise,sunset",
+        "timezone": "Europe/London",
+        "models": "ukmo_global"
+    }
+    r = http_with_retry("GET", url, params=params)
+    r.raise_for_status()
+    data = r.json().get("daily", {})
+    sunrise = data.get("sunrise", ["—"])[0]
+    sunset = data.get("sunset", ["—"])[0]
+    return sunrise, sunset
 
 def today_india_iso():
     today = dt.date.today().strftime("%Y-%m-%d")
@@ -148,8 +163,9 @@ def build_message(te, ta):
     weekdayTA = _safe(ta, "data", "vaara")
     weekdayEN = dt.date.today().strftime("%A")
 
-    sunrise_raw = _safe(te, "data", "sunrise")
-    sunset_raw  = _safe(te, "data", "sunset")
+    uk_sunrise_raw, uk_sunset_raw = get_metoffice_sun_times(float(lat), float(lon))
+    sunrise_raw = uk_sunrise_raw
+    sunset_raw  = uk_sunset_raw
 
     sunrise = to_uk(sunrise_raw)
     sunset  = to_uk(sunset_raw)
@@ -231,3 +247,4 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(f"Error: {e}".encode())
+
