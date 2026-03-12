@@ -25,7 +25,7 @@ def http_with_retry(method, url, *, max_attempts=3, backoff=0.7, **kwargs):
                 break
             time.sleep(backoff * attempt)
     raise last_exc
-
+ 
 # --------------------------
 # MET OFFICE (via Open‑Meteo UKMO)
 # --------------------------
@@ -248,3 +248,4 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length",str(len(tb)))
             self.end_headers()
             self.wfile.write(tb)
+
